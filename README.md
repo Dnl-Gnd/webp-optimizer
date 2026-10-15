@@ -1,36 +1,55 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Optimizador WebP
 
-## Getting Started
+Aplicación web para convertir imágenes (PNG, JPG, GIF, BMP, AVIF, WebP) a **WebP** y reducir su peso sin perder calidad visible. Todo el procesamiento ocurre **en el navegador**: las imágenes nunca se suben a un servidor.
 
-First, run the development server:
+## Funciones
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+- **Slider de calidad** (1–100) con presets: Máxima calidad (92), Equilibrado (80), Más ligero (65).
+- **Modo sin pérdida**, ideal para logos, íconos y capturas de pantalla.
+- **Redimensionar** por ancho/alto máximo (mantiene proporción, nunca agranda), con presets 2560/1920/1280/800 px.
+- **Esfuerzo de compresión** (0–6) de libwebp.
+- **Varias imágenes a la vez**, procesadas en paralelo con un pool de Web Workers.
+- **Descarga individual o en ZIP**.
+- **Comparador antes/después** con deslizador y vista 1:1.
+- Aviso cuando el WebP resultante pesa más que el original.
+
+## Stack
+
+- Next.js 15 (App Router) + TypeScript
+- Tailwind CSS v4
+- [`@jsquash/webp`](https://github.com/jamsinclair/jSquash): libwebp compilado a WebAssembly (mismo codificador que Squoosh). Da resultados consistentes en todos los navegadores, incluido Safari, que no soporta exportar WebP desde `<canvas>`.
+- [`fflate`](https://github.com/101arrowz/fflate) para generar el ZIP.
+
+## Cómo funciona
+
+1. `createImageBitmap` decodifica la imagen dentro de un Web Worker.
+2. Si hay redimensión, se reduce en pasos de 50% sobre `OffscreenCanvas` (evita el aliasing de una reducción grande en un solo paso).
+3. `@jsquash/webp` codifica el `ImageData` a WebP con `use_sharp_yuv` para mantener bordes y texto nítidos.
+4. Al cambiar ajustes, las imágenes se reprocesan (con debounce) y se descartan resultados obsoletos.
+
+```
+src/
+├── app/                 # layout, página y estilos globales
+├── components/
+│   ├── Optimizer.tsx     # estado principal, cola, ZIP, modal de comparación
+│   ├── SettingsPanel.tsx
+│   ├── ImageCard.tsx
+│   ├── CompareSlider.tsx
+│   └── Dropzone.tsx
+├── lib/
+│   ├── pool.ts           # pool de Web Workers
+│   ├── format.ts
+│   └── types.ts
+└── workers/
+    └── optimize.worker.ts
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Desarrollo
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm install
+npm run dev     # http://localhost:3000
+npm run build   # build de producción
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Se despliega en Vercel sin configuración adicional (es un sitio estático).
