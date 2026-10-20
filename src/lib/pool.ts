@@ -53,6 +53,24 @@ export class OptimizerPool {
     this.pending.clear();
   }
 
+  /** Cancela el trabajo de una imagen concreta (en cola o en proceso). */
+  cancel(id: string) {
+    const cancelled = (job: Job) => job.resolve({ id: job.req.id, ok: false, error: "Cancelado", cancelled: true });
+    this.queue = this.queue.filter((job) => {
+      if (job.req.id !== id) return true;
+      cancelled(job);
+      return false;
+    });
+    for (const [w, job] of this.pending) {
+      if (job.req.id !== id) continue;
+      w.terminate();
+      this.pending.delete(w);
+      cancelled(job);
+      this.idle.push(this.spawn());
+    }
+    this.pump();
+  }
+
   private pump() {
     while (this.idle.length && this.queue.length) {
       const w = this.idle.pop()!;

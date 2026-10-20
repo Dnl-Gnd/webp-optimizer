@@ -1,6 +1,7 @@
 export type Codec = "webp" | "avif" | "jpeg" | "png";
 export type OutputFormat = Codec | "auto";
-export type CompressionMode = "quality" | "target";
+export type CompressionMode = "quality" | "target" | "auto";
+export type Fidelity = "imperceptible" | "high" | "balanced";
 
 /** Ajustes que afectan la codificación (cambiarlos reprocesa las imágenes). */
 export type Settings = {
@@ -10,6 +11,8 @@ export type Settings = {
   quality: number;
   /** Peso objetivo en KB (modo "target"). */
   targetKB: number;
+  /** Nivel de fidelidad para la calidad automática (modo "auto"). */
+  fidelity: Fidelity;
   /** 0 = sin límite */
   maxWidth: number;
   /** 0 = sin límite */
@@ -42,6 +45,8 @@ export type Candidate = {
   quality: number | null;
   /** Relación señal/ruido frente al original (dB). Más alto = más fiel. */
   psnr?: number;
+  /** Similitud estructural frente al original (0-1), en calidad automática. */
+  ssim?: number;
   targetMet?: boolean;
 };
 
@@ -55,6 +60,8 @@ export type OptimizeResponse =
       quality: number | null;
       /** Solo en modo tamaño objetivo. */
       targetMet?: boolean;
+      /** SSIM del resultado (solo en calidad automática). */
+      ssim?: number;
       /** Todos los formatos probados (modo auto). */
       candidates: Candidate[];
       /** La imagen tenía transparencia y se aplanó sobre blanco (JPEG). */
@@ -75,14 +82,19 @@ export type ImageItem = {
   folder: string;
   originalUrl: string;
   status: ItemStatus;
-  /** Versión de ajustes con la que se generó el resultado actual. */
-  version: number;
+  /** Clave de los ajustes con que se generó (o se está generando) el resultado. */
+  settingsKey: string;
+  /** Ajustes propios de esta imagen; null = usa los globales. */
+  override: Settings | null;
+  /** Nombre final escrito a mano (sin extensión); reemplaza las reglas globales. */
+  customName: string | null;
   result?: {
     blob: Blob;
     url: string;
     codec: Codec;
     quality: number | null;
     targetMet?: boolean;
+    ssim?: number;
     candidates: Candidate[];
     flattened: boolean;
     width: number;

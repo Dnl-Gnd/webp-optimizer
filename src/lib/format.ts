@@ -44,14 +44,20 @@ export function buildOutputName(
   original: string,
   ext: string,
   naming: Naming,
-  opts: { width?: number; folder?: string; withFolder?: boolean } = {},
+  opts: { width?: number; folder?: string; withFolder?: boolean; custom?: string | null } = {},
 ) {
-  let base = original.replace(/\.[^.]+$/, "");
-  if (naming.slug) base = slugify(base) || "imagen";
-  let name = `${naming.prefix}${base}${naming.suffix}`;
-  if (naming.addWidth && opts.width) name += `-${opts.width}w`;
-  if (naming.slug) name = slugify(name) || "imagen";
-  name = `${safe(name)}.${ext}`;
+  let name: string;
+  if (opts.custom) {
+    // Nombre escrito a mano: es el nombre final, sin aplicar reglas globales.
+    name = `${safe(opts.custom)}.${ext}`;
+  } else {
+    let base = original.replace(/\.[^.]+$/, "");
+    if (naming.slug) base = slugify(base) || "imagen";
+    name = `${naming.prefix}${base}${naming.suffix}`;
+    if (naming.addWidth && opts.width) name += `-${opts.width}w`;
+    if (naming.slug) name = slugify(name) || "imagen";
+    name = `${safe(name)}.${ext}`;
+  }
 
   if (opts.withFolder && naming.keepFolders && opts.folder) {
     const folder = opts.folder
@@ -70,5 +76,11 @@ export function outputNameFor(item: ImageItem, naming: Naming, withFolder = fals
     width: item.result?.width,
     folder: item.folder,
     withFolder,
+    custom: item.customName,
   });
+}
+
+/** Limpia lo que el usuario escribe al renombrar: quita espacios sobrantes y una extensión de imagen si la puso. */
+export function cleanCustomName(text: string) {
+  return text.trim().replace(/\.(webp|avif|jpe?g|png|gif|bmp)$/i, "").trim();
 }

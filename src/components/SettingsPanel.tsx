@@ -1,11 +1,20 @@
 "use client";
 
-import type { CompressionMode, OutputFormat, Settings } from "@/lib/types";
+import type { CompressionMode, Fidelity, OutputFormat, Settings } from "@/lib/types";
+import { FIDELITY_INFO } from "@/lib/codecs";
 
 type Props = {
   settings: Settings;
   onChange: (s: Settings) => void;
+  /** Variante embebida en una tarjeta (ajustes por imagen). */
+  embedded?: boolean;
 };
+
+const MODES: { value: CompressionMode; label: string }[] = [
+  { value: "quality", label: "Calidad" },
+  { value: "auto", label: "Calidad auto" },
+  { value: "target", label: "Peso objetivo" },
+];
 
 const FORMATS: { value: OutputFormat; label: string; hint: string }[] = [
   { value: "auto", label: "Auto", hint: "Prueba WebP, AVIF y JPEG y elige el mejor para cada imagen." },
@@ -31,18 +40,18 @@ const SIZE_PRESETS = [
   { label: "800", w: 800, h: 0 },
 ];
 
-export default function SettingsPanel({ settings, onChange }: Props) {
+export default function SettingsPanel({ settings, onChange, embedded = false }: Props) {
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => onChange({ ...settings, [k]: v });
 
   const isPng = settings.format === "png";
   const isJpeg = settings.format === "jpeg";
-  // Sin pérdida no aplica a JPEG/PNG (PNG siempre lo es) ni al modo tamaño objetivo.
+  // Sin pérdida no aplica a JPEG/PNG (PNG siempre lo es) ni a los modos automáticos.
   const losslessAvailable = !isPng && !isJpeg && settings.mode === "quality";
   const lossless = losslessAvailable && settings.lossless;
   const formatHint = FORMATS.find((f) => f.value === settings.format)?.hint;
 
   return (
-    <section className="flex flex-col gap-6 rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+    <section className={embedded ? "flex flex-col gap-5" : "flex flex-col gap-6 rounded-2xl border border-white/10 bg-white/[0.03] p-5"}>
       {/* Formato */}
       <div className="flex flex-col gap-3">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-400">Formato</h2>
@@ -67,30 +76,23 @@ export default function SettingsPanel({ settings, onChange }: Props) {
 
       {/* Compresión */}
       <div className="flex flex-col gap-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-400">Compresión</h2>
-          {!isPng && (
-            <div className="flex rounded-lg border border-white/10 p-0.5 text-xs" role="radiogroup" aria-label="Modo de compresión">
-              {(
-                [
-                  ["quality", "Calidad"],
-                  ["target", "Peso objetivo"],
-                ] as [CompressionMode, string][]
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  role="radio"
-                  aria-checked={settings.mode === value}
-                  onClick={() => set("mode", value)}
-                  className={`rounded-md px-2 py-1 transition ${settings.mode === value ? "bg-white/15 text-white" : "text-neutral-400 hover:text-white"}`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-400">Compresión</h2>
+        {!isPng && (
+          <div className="grid grid-cols-3 gap-1 rounded-xl border border-white/10 bg-black/30 p-1 text-xs" role="radiogroup" aria-label="Modo de compresión">
+            {MODES.map((m) => (
+              <button
+                key={m.value}
+                type="button"
+                role="radio"
+                aria-checked={settings.mode === m.value}
+                onClick={() => set("mode", m.value)}
+                className={`rounded-lg px-1 py-1.5 font-medium transition ${settings.mode === m.value ? "bg-white/15 text-white" : "text-neutral-400 hover:text-white"}`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {isPng ? (
           <p className="text-xs text-neutral-500">PNG es siempre sin pérdida: se optimiza la compresión sin tocar un solo píxel.</p>
@@ -116,6 +118,19 @@ export default function SettingsPanel({ settings, onChange }: Props) {
                 </Chip>
               ))}
             </div>
+          </>
+        ) : settings.mode === "auto" ? (
+          <>
+            <div className="flex flex-wrap gap-2">
+              {(Object.keys(FIDELITY_INFO) as Fidelity[]).map((f) => (
+                <Chip key={f} active={settings.fidelity === f} onClick={() => set("fidelity", f)}>
+                  {FIDELITY_INFO[f].label}
+                </Chip>
+              ))}
+            </div>
+            <p className="text-xs text-neutral-500">
+              {FIDELITY_INFO[settings.fidelity].hint} Busca la calidad más baja que se ve igual al original (medido con SSIM).
+            </p>
           </>
         ) : (
           <>

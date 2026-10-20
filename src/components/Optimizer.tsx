@@ -18,6 +18,7 @@ const DEFAULT_SETTINGS: Settings = {
   mode: "quality",
   quality: 80,
   targetKB: 200,
+  fidelity: "high",
   maxWidth: 0,
   maxHeight: 0,
   lossless: false,
@@ -49,12 +50,10 @@ export default function Optimizer() {
   const [toast, setToast] = useState<string | null>(null);
 
   const effective = useMemo(() => effectiveSettings(settings), [settings]);
-  // Clave estable: solo reprocesa si cambia algo que afecta la codificación.
-  const effectiveKey = JSON.stringify(effective);
 
   const poolRef = useRef<OptimizerPool | null>(null);
-  const settingsRef = useRef(effective);
-  const versionRef = useRef(0);
+  /** Último trabajo lanzado por imagen: los resultados de trabajos anteriores se descartan. */
+  const tokensRef = useRef(new Map<string, number>());
   const itemsRef = useRef<ImageItem[]>([]);
   itemsRef.current = items;
 
@@ -69,24 +68,30 @@ export default function Optimizer() {
     };
   }, []);
 
-  const processItem = useCallback(async (item: ImageItem, version: number) => {
+  /** Ajustes efectivos de una imagen: los propios si los tiene, si no los globales. */
+  const settingsFor = useCallback((it: ImageItem) => (it.override ? effectiveSettings(it.override) : effective), [effective]);
+
+  const schedule = useCallback(async (item: ImageItem, s: Settings, key: string) => {
     const pool = poolRef.current;
     if (!pool) return;
-    const res = await pool.run(item.id, item.file, settingsRef.current);
-    // Si los ajustes cambiaron mientras se procesaba, descartar este resultado.
-    if (version !== versionRef.current) return;
+    const token = (tokensRef.current.get(item.id) ?? 0) + 1;
+    tokensRef.current.set(item.id, token);
+    pool.cancel(item.id);
+    setItems((prev) => prev.map((it) => (it.id === item.id ? { ...it, status: "processing", settingsKey: key } : it)));
+
+    const res = await pool.run(item.id, item.file, s);
+    if (tokensRef.current.get(item.id) !== token) return; // hay un trabajo más nuevo
     if (!res.ok && res.cancelled) return;
 
     setItems((prev) =>
       prev.map((it) => {
         if (it.id !== item.id) return it;
-        if (!res.ok) return { ...it, status: "error", error: res.error, version };
+        if (!res.ok) return { ...it, status: "error", error: res.error };
         if (it.result) URL.revokeObjectURL(it.result.url);
         const blob = new Blob([res.buffer], { type: CODEC_INFO[res.codec].mime });
         return {
           ...it,
           status: "done",
-          version,
           error: undefined,
           result: {
             blob,
@@ -94,6 +99,7 @@ export default function Optimizer() {
             codec: res.codec,
             quality: res.quality,
             targetMet: res.targetMet,
+            ssim: res.ssim,
             candidates: res.candidates,
             flattened: res.flattened,
             width: res.width,
@@ -106,22 +112,19 @@ export default function Optimizer() {
     );
   }, []);
 
-  const addFiles = useCallback(
-    (files: IncomingFile[]) => {
-      const version = versionRef.current;
-      const newItems: ImageItem[] = files.map(({ file, folder }) => ({
-        id: crypto.randomUUID(),
-        file,
-        folder,
-        originalUrl: URL.createObjectURL(file),
-        status: "processing",
-        version,
-      }));
-      setItems((prev) => [...prev, ...newItems]);
-      newItems.forEach((it) => processItem(it, version));
-    },
-    [processItem],
-  );
+  const addFiles = useCallback((files: IncomingFile[]) => {
+    const newItems: ImageItem[] = files.map(({ file, folder }) => ({
+      id: crypto.randomUUID(),
+      file,
+      folder,
+      originalUrl: URL.createObjectURL(file),
+      status: "processing",
+      settingsKey: "",
+      override: null,
+      customName: null,
+    }));
+    setItems((prev) => [...prev, ...newItems]);
+  }, []);
 
   // Pegar imágenes con Ctrl+V en cualquier parte de la página.
   useEffect(() => {
@@ -143,21 +146,30 @@ export default function Optimizer() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // Reprocesar todo cuando cambian los ajustes de codificación (con debounce).
+  // Qué ajustes debería tener cada imagen. Solo cambia al tocar ajustes o agregar/quitar imágenes,
+  // no cuando llegan resultados.
+  const desired = items.map((it) => `${it.id}=${JSON.stringify(settingsFor(it))}`).join("|");
+
+  // Procesa las imágenes cuyos ajustes deseados no coinciden con los del resultado actual.
   useEffect(() => {
-    settingsRef.current = JSON.parse(effectiveKey) as Settings;
-    const t = setTimeout(() => {
-      const current = itemsRef.current;
-      if (!current.length) return;
-      const version = ++versionRef.current;
-      poolRef.current?.cancelAll();
-      setItems((prev) => prev.map((it) => ({ ...it, status: "processing" })));
-      current.forEach((it) => processItem(it, version));
-    }, 350);
+    const pending = itemsRef.current
+      .map((it) => {
+        const s = settingsFor(it);
+        return { it, s, key: JSON.stringify(s) };
+      })
+      .filter(({ it, key }) => it.settingsKey !== key);
+    if (!pending.length) return;
+    // Imágenes nuevas: de inmediato. Cambios de ajustes: con debounce para no saturar al mover sliders.
+    const delay = pending.every(({ it }) => it.settingsKey === "") ? 0 : 350;
+    const t = setTimeout(() => pending.forEach(({ it, s, key }) => schedule(it, s, key)), delay);
     return () => clearTimeout(t);
-  }, [effectiveKey, processItem]);
+  }, [desired, settingsFor, schedule]);
+
+  const updateItem = (id: string, patch: Partial<ImageItem>) => setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
 
   const removeItem = (id: string) => {
+    poolRef.current?.cancel(id);
+    tokensRef.current.delete(id);
     setItems((prev) => {
       const it = prev.find((i) => i.id === id);
       if (it) {
@@ -175,7 +187,7 @@ export default function Optimizer() {
       if (i.result) URL.revokeObjectURL(i.result.url);
     });
     poolRef.current?.cancelAll();
-    versionRef.current++;
+    tokensRef.current.clear();
     setItems([]);
     setCompareId(null);
   };
@@ -253,7 +265,10 @@ export default function Optimizer() {
                   key={it.id}
                   item={it}
                   outputName={outputNameFor(it, naming, true)}
-                  targetKB={effective.mode === "target" ? effective.targetKB : undefined}
+                  settings={settingsFor(it)}
+                  globalSettings={settings}
+                  onRename={(name) => updateItem(it.id, { customName: name })}
+                  onOverride={(s) => updateItem(it.id, { override: s })}
                   onCompare={() => setCompareId(it.id)}
                   onDownload={() => it.result && downloadBlob(it.result.blob, outputNameFor(it, naming))}
                   onRemove={() => removeItem(it.id)}

@@ -4,7 +4,7 @@ import encodeAvif from "@jsquash/avif/encode";
 import encodeJpeg from "@jsquash/jpeg/encode";
 import optimisePng from "@jsquash/oxipng/optimise";
 import type { Candidate, Codec, OptimizeRequest, OptimizeResponse, Settings } from "@/lib/types";
-import { CODEC_INFO } from "@/lib/codecs";
+import { CODEC_INFO, FIDELITY_SSIM } from "@/lib/codecs";
 
 declare const self: DedicatedWorkerGlobalScope;
 
@@ -74,36 +74,89 @@ function flattenOnWhite(img: ImageData): ImageData {
   return out;
 }
 
-/**
- * PSNR (dB) entre la imagen de referencia y el archivo codificado.
- * Usa colores premultiplicados por alfa para que los píxeles invisibles no cuenten.
- */
-async function psnr(reference: ImageData, buffer: ArrayBuffer, mime: string): Promise<number | undefined> {
+/** Decodifica un archivo codificado a ImageData usando el decodificador del navegador. */
+async function decode(buffer: ArrayBuffer, mime: string, width: number, height: number): Promise<ImageData | undefined> {
   try {
     const bmp = await createImageBitmap(new Blob([buffer], { type: mime }));
-    const c = new OffscreenCanvas(reference.width, reference.height);
+    const c = new OffscreenCanvas(width, height);
     const ctx = c.getContext("2d", { willReadFrequently: true })!;
     ctx.drawImage(bmp, 0, 0);
     bmp.close();
-    const a = reference.data;
-    const b = ctx.getImageData(0, 0, reference.width, reference.height).data;
-    let sum = 0;
-    for (let i = 0; i < a.length; i += 4) {
-      const aa = a[i + 3] / 255;
-      const ba = b[i + 3] / 255;
-      for (let k = 0; k < 3; k++) {
-        const diff = a[i + k] * aa - b[i + k] * ba;
-        sum += diff * diff;
-      }
-      const da = a[i + 3] - b[i + 3];
-      sum += da * da;
-    }
-    const mse = sum / ((a.length / 4) * 4);
-    return mse === 0 ? 99 : 10 * Math.log10((255 * 255) / mse);
+    return ctx.getImageData(0, 0, width, height);
   } catch {
     // El navegador no sabe decodificar este formato (p. ej. AVIF en navegadores viejos).
     return undefined;
   }
+}
+
+/** PSNR (dB) con colores premultiplicados por alfa: los píxeles invisibles no cuentan. */
+function psnr(a: ImageData, b: ImageData): number {
+  const x = a.data;
+  const y = b.data;
+  let sum = 0;
+  for (let i = 0; i < x.length; i += 4) {
+    const xa = x[i + 3] / 255;
+    const ya = y[i + 3] / 255;
+    for (let k = 0; k < 3; k++) {
+      const diff = x[i + k] * xa - y[i + k] * ya;
+      sum += diff * diff;
+    }
+    const da = x[i + 3] - y[i + 3];
+    sum += da * da;
+  }
+  const mse = sum / x.length;
+  return mse === 0 ? 99 : 10 * Math.log10((255 * 255) / mse);
+}
+
+/** Luminancia (BT.601) compuesta sobre blanco, para que la transparencia no confunda la métrica. */
+function luma(img: ImageData): Float32Array {
+  const d = img.data;
+  const out = new Float32Array(img.width * img.height);
+  for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+    const a = d[i + 3] / 255;
+    const r = d[i] * a + 255 * (1 - a);
+    const g = d[i + 1] * a + 255 * (1 - a);
+    const b = d[i + 2] * a + 255 * (1 - a);
+    out[p] = 0.299 * r + 0.587 * g + 0.114 * b;
+  }
+  return out;
+}
+
+/**
+ * SSIM medio sobre ventanas de 8×8 (paso 4) en luminancia.
+ * 1 = idéntico. ~0.99 suele ser indistinguible a simple vista.
+ */
+function ssim(refY: Float32Array, img: ImageData): number {
+  const { width: w, height: h } = img;
+  const Y = luma(img);
+  const C1 = (0.01 * 255) ** 2;
+  const C2 = (0.03 * 255) ** 2;
+  const N = 8;
+  const STEP = 4;
+  let total = 0;
+  let count = 0;
+  for (let y0 = 0; y0 + N <= h; y0 += STEP) {
+    for (let x0 = 0; x0 + N <= w; x0 += STEP) {
+      let sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+      for (let y = y0; y < y0 + N; y++) {
+        let p = y * w + x0;
+        for (let x = 0; x < N; x++, p++) {
+          const a = refY[p];
+          const b = Y[p];
+          sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
+        }
+      }
+      const n = N * N;
+      const ma = sa / n;
+      const mb = sb / n;
+      const va = saa / n - ma * ma;
+      const vb = sbb / n - mb * mb;
+      const cov = sab / n - ma * mb;
+      total += ((2 * ma * mb + C1) * (2 * cov + C2)) / ((ma * ma + mb * mb + C1) * (va + vb + C2));
+      count++;
+    }
+  }
+  return count ? total / count : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,20 +199,27 @@ async function encodeWith(codec: Codec, img: ImageData, quality: number, s: Sett
 
 const isLossyCodec = (codec: Codec, s: Settings) => codec === "jpeg" || ((codec === "webp" || codec === "avif") && !s.lossless);
 
-type Encoded = { buffer: ArrayBuffer; quality: number | null; targetMet?: boolean };
+type Encoded = { buffer: ArrayBuffer; quality: number | null; targetMet?: boolean; ssim?: number };
 
 /**
- * Búsqueda binaria de la calidad más alta cuyo resultado cabe en `limitBytes`.
+ * AVIF es lento: las búsquedas usan una velocidad mayor y menos iteraciones;
+ * al final se recodifica una sola vez con el esfuerzo elegido.
+ */
+function searchConfig(codec: Codec, s: Settings) {
+  return {
+    searchSettings: codec === "avif" ? { ...s, effort: Math.max(0, s.effort - 3) } : s,
+    maxIter: codec === "avif" ? 5 : 7,
+  };
+}
+
+/**
+ * Peso objetivo: búsqueda binaria de la calidad más alta que cabe en `limitBytes`.
  * `limitBytes` es el menor entre el objetivo del usuario y el peso original:
  * no tiene sentido devolver un archivo más pesado que el que entró.
  * `targetMet` siempre se evalúa contra el objetivo del usuario.
  */
 async function encodeToTarget(codec: Codec, img: ImageData, s: Settings, targetBytes: number, limitBytes: number): Promise<Encoded> {
-  // AVIF es lento: la búsqueda usa una velocidad mayor y menos iteraciones;
-  // al final se recodifica una sola vez con el esfuerzo elegido.
-  const searchSettings: Settings = codec === "avif" ? { ...s, effort: Math.max(0, s.effort - 3) } : s;
-  const maxIter = codec === "avif" ? 5 : 7;
-
+  const { searchSettings, maxIter } = searchConfig(codec, s);
   let lo = 5;
   let hi = 95;
   let best: Encoded | null = null;
@@ -183,7 +243,7 @@ async function encodeToTarget(codec: Codec, img: ImageData, s: Settings, targetB
     best = smallest && smallest.buffer.byteLength <= buffer.byteLength ? smallest : { buffer, quality: 5 };
   }
 
-  if (codec === "avif" && searchSettings !== s && best.quality !== null) {
+  if (searchSettings !== s && best.quality !== null) {
     const final = await encodeWith(codec, img, best.quality, s);
     // Con más esfuerzo casi siempre pesa menos; si no, se queda el de la búsqueda.
     if (final.byteLength <= Math.max(limitBytes, best.buffer.byteLength)) best = { buffer: final, quality: best.quality };
@@ -192,10 +252,55 @@ async function encodeToTarget(codec: Codec, img: ImageData, s: Settings, targetB
   return { ...best, targetMet: best.buffer.byteLength <= targetBytes };
 }
 
-async function encodeOne(codec: Codec, img: ImageData, s: Settings, originalBytes: number): Promise<Encoded> {
+/**
+ * Calidad automática: búsqueda binaria de la calidad MÁS BAJA cuyo resultado
+ * mantiene un SSIM igual o mayor al umbral de fidelidad elegido.
+ */
+async function encodeToFidelity(codec: Codec, img: ImageData, s: Settings, refY: Float32Array): Promise<Encoded> {
+  const threshold = FIDELITY_SSIM[s.fidelity];
+  const { searchSettings, maxIter } = searchConfig(codec, s);
+  const { mime } = CODEC_INFO[codec];
+  let lo = 5;
+  let hi = 100;
+  let best: Encoded | null = null;
+  let highest: Encoded | null = null;
+
+  for (let i = 0; i < maxIter && lo <= hi; i++) {
+    const q = Math.round((lo + hi) / 2);
+    const buffer = await encodeWith(codec, img, q, searchSettings);
+    const decoded = await decode(buffer, mime, img.width, img.height);
+    if (!decoded) {
+      // Sin decodificador no se puede medir: usar la calidad manual.
+      const fallback = await encodeWith(codec, img, s.quality, s);
+      return { buffer: fallback, quality: s.quality };
+    }
+    const score = ssim(refY, decoded);
+    if (!highest || q > (highest.quality ?? 0)) highest = { buffer, quality: q, ssim: score };
+    if (score >= threshold) {
+      if (!best || q < (best.quality ?? 101)) best = { buffer, quality: q, ssim: score };
+      hi = q - 1;
+    } else {
+      lo = q + 1;
+    }
+  }
+
+  // Si nunca alcanzó el umbral, la mejor opción es la calidad más alta probada.
+  best ??= highest!;
+
+  if (searchSettings !== s && best.quality !== null) {
+    const final = await encodeWith(codec, img, best.quality, s);
+    const decoded = await decode(final, mime, img.width, img.height);
+    const score = decoded ? ssim(refY, decoded) : undefined;
+    if (score !== undefined && score >= Math.min(threshold, best.ssim ?? 0)) best = { buffer: final, quality: best.quality, ssim: score };
+  }
+  return best;
+}
+
+async function encodeOne(codec: Codec, img: ImageData, s: Settings, originalBytes: number, refY: () => Float32Array): Promise<Encoded> {
   const targetBytes = s.targetKB * 1024;
-  if (s.mode === "target" && isLossyCodec(codec, s)) {
-    return encodeToTarget(codec, img, s, targetBytes, Math.min(targetBytes, originalBytes));
+  if (isLossyCodec(codec, s)) {
+    if (s.mode === "target") return encodeToTarget(codec, img, s, targetBytes, Math.min(targetBytes, originalBytes));
+    if (s.mode === "auto") return encodeToFidelity(codec, img, s, refY());
   }
   const buffer = await encodeWith(codec, img, s.quality, s);
   const quality = isLossyCodec(codec, s) ? s.quality : null;
@@ -219,6 +324,10 @@ self.onmessage = async (e: MessageEvent<OptimizeRequest>) => {
     bitmap.close();
     const alpha = hasAlpha(imageData);
 
+    // Luminancia de referencia, calculada una sola vez y solo si se necesita.
+    let refYCache: Float32Array | undefined;
+    const refY = () => (refYCache ??= luma(imageData));
+
     // Qué códecs probar.
     let codecs: Codec[];
     if (settings.format === "auto") {
@@ -231,7 +340,7 @@ self.onmessage = async (e: MessageEvent<OptimizeRequest>) => {
     for (const codec of codecs) {
       const flattened = codec === "jpeg" && alpha;
       const input = flattened ? flattenOnWhite(imageData) : imageData;
-      const r = await encodeOne(codec, input, settings, file.size);
+      const r = await encodeOne(codec, input, settings, file.size, refY);
       results.push({ ...r, codec, flattened });
     }
 
@@ -240,14 +349,16 @@ self.onmessage = async (e: MessageEvent<OptimizeRequest>) => {
     if (results.length > 1) {
       if (settings.mode === "target") {
         // Entre los que cumplen el peso, el más fiel al original (mayor PSNR).
-        for (const r of results) r.psnr = await psnr(imageData, r.buffer, CODEC_INFO[r.codec].mime);
-        const met = results.filter((r) => r.targetMet);
-        if (met.length) {
-          winner = met.reduce((a, b) => ((b.psnr ?? -1) > (a.psnr ?? -1) ? b : a));
-        } else {
-          winner = results.reduce((a, b) => (b.buffer.byteLength < a.buffer.byteLength ? b : a));
+        for (const r of results) {
+          const decoded = await decode(r.buffer, CODEC_INFO[r.codec].mime, width, height);
+          r.psnr = decoded ? psnr(imageData, decoded) : undefined;
         }
+        const met = results.filter((r) => r.targetMet);
+        winner = met.length
+          ? met.reduce((a, b) => ((b.psnr ?? -1) > (a.psnr ?? -1) ? b : a))
+          : results.reduce((a, b) => (b.buffer.byteLength < a.buffer.byteLength ? b : a));
       } else {
+        // Calidad manual o automática: todos tienen la fidelidad pedida, gana el más ligero.
         winner = results.reduce((a, b) => (b.buffer.byteLength < a.buffer.byteLength ? b : a));
       }
     }
@@ -257,6 +368,7 @@ self.onmessage = async (e: MessageEvent<OptimizeRequest>) => {
       size: r.buffer.byteLength,
       quality: r.quality,
       psnr: r.psnr,
+      ssim: r.ssim,
       targetMet: r.targetMet,
     }));
 
@@ -267,6 +379,7 @@ self.onmessage = async (e: MessageEvent<OptimizeRequest>) => {
       codec: winner.codec,
       quality: winner.quality,
       targetMet: winner.targetMet,
+      ssim: winner.ssim,
       candidates,
       flattened: winner.flattened,
       width,
