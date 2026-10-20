@@ -4,8 +4,8 @@ import { GeistMono } from "geist/font/mono";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Optimizador WebP",
-  description: "Convierte y optimiza imágenes a WebP directamente en tu navegador.",
+  title: "Optimizador de imágenes",
+  description: "Convierte y optimiza imágenes a WebP, AVIF, JPEG o PNG directamente en tu navegador.",
 };
 
 export default function RootLayout({

@@ -2,19 +2,23 @@
 
 import type { ImageItem } from "@/lib/types";
 import { formatBytes, savingPercent } from "@/lib/format";
+import { CODEC_INFO } from "@/lib/codecs";
 
 type Props = {
   item: ImageItem;
+  outputName: string;
+  targetKB?: number;
   onCompare: () => void;
   onDownload: () => void;
   onRemove: () => void;
 };
 
-export default function ImageCard({ item, onCompare, onDownload, onRemove }: Props) {
+export default function ImageCard({ item, outputName, targetKB, onCompare, onDownload, onRemove }: Props) {
   const { result, status } = item;
   const saving = result ? savingPercent(item.file.size, result.blob.size) : 0;
   const bigger = result ? result.blob.size >= item.file.size : false;
-  const busy = status === "queued" || status === "processing";
+  const busy = status === "processing";
+  const missedTarget = result && result.targetMet === false;
 
   return (
     <li className="flex items-center gap-4 rounded-xl border border-white/10 bg-white/[0.03] p-3" data-testid="image-card" data-status={status}>
@@ -35,27 +39,58 @@ export default function ImageCard({ item, onCompare, onDownload, onRemove }: Pro
       </button>
 
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-white" title={item.file.name}>{item.file.name}</p>
+        <p className="truncate text-sm font-medium text-white" title={item.folder ? `${item.folder}/${item.file.name}` : item.file.name}>
+          {item.folder && <span className="text-neutral-500">{item.folder}/</span>}
+          {item.file.name}
+        </p>
+        {result && (
+          <p className="truncate font-mono text-[11px] text-neutral-500" title={outputName} data-testid="output-name">
+            → {outputName}
+          </p>
+        )}
         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-neutral-400">
           <span>{formatBytes(item.file.size)}</span>
           {result && (
             <>
               <span aria-hidden>→</span>
-              <span className="font-medium text-white" data-testid="optimized-size">{formatBytes(result.blob.size)}</span>
+              <span className="font-medium text-white" data-testid="optimized-size">
+                {formatBytes(result.blob.size)}
+              </span>
               <span className={`rounded px-1.5 py-0.5 font-medium ${bigger ? "bg-amber-500/15 text-amber-300" : "bg-emerald-500/15 text-emerald-300"}`}>
                 {bigger ? `+${Math.abs(saving)}%` : `−${saving}%`}
               </span>
+              <span className="rounded bg-white/10 px-1.5 py-0.5 font-medium text-neutral-200" data-testid="codec">
+                {CODEC_INFO[result.codec].label}
+                {result.quality !== null ? ` · q${result.quality}` : " · sin pérdida"}
+              </span>
               <span className="text-neutral-500">
-                {result.origWidth !== result.width
-                  ? `${result.origWidth}×${result.origHeight} → ${result.width}×${result.height}`
-                  : `${result.width}×${result.height}`}
+                {result.origWidth !== result.width ? `${result.origWidth}×${result.origHeight} → ${result.width}×${result.height}` : `${result.width}×${result.height}`}
               </span>
             </>
           )}
-          {busy && <span>{status === "queued" ? "En cola…" : "Optimizando…"}</span>}
+          {busy && <span>Optimizando…</span>}
           {status === "error" && <span className="text-red-400">Error: {item.error}</span>}
         </div>
-        {bigger && <p className="mt-1 text-xs text-amber-300/80">El WebP pesa más que el original; prueba bajar la calidad o desactivar &quot;sin pérdida&quot;.</p>}
+
+        {result && result.candidates.length > 1 && (
+          <p className="mt-1 text-[11px] text-neutral-500" data-testid="candidates">
+            Probados:{" "}
+            {result.candidates
+              .slice()
+              .sort((a, b) => a.size - b.size)
+              .map((c) => `${CODEC_INFO[c.codec].label} ${formatBytes(c.size)}${c.targetMet === false ? " (excede)" : ""}`)
+              .join(" · ")}
+          </p>
+        )}
+        {missedTarget && (
+          <p className="mt-1 text-xs text-amber-300/80">
+            No cabe en {targetKB} KB ni con calidad mínima; prueba redimensionar o subir el objetivo.
+          </p>
+        )}
+        {result?.flattened && <p className="mt-1 text-xs text-amber-300/80">JPEG no admite transparencia: el fondo se rellenó en blanco.</p>}
+        {bigger && !missedTarget && (
+          <p className="mt-1 text-xs text-amber-300/80">El resultado pesa más que el original; prueba bajar la calidad u otro formato.</p>
+        )}
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
